@@ -1,128 +1,141 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import SampleForm from "./components/SampleForm";
+import OrderFilter from "./components/OrderFilter";
+import BatchList from "./components/BatchList";
+import StatsBar from "./components/StatsBar";
+import {
+  computeStats,
+  createLocalStorageStore,
+  downloadCsv,
+  filterByOrder,
+  judgeStatus,
+  listOrderNos,
+  nextBatchId,
+  parseNumberField,
+  SEED_BATCHES,
+  type SampleBatch,
+  type SampleDraft,
+} from "./lab";
 
-const project = {
-  "sourceNo": 7,
-  "id": "hxyfront-62012",
-  "port": 62012,
-  "title": "纺织染整小样管理",
-  "domain": "纺织染整",
-  "prompt": "我需要一个纺织染整实验室的小样管理前端系统，可以记录面料成分、克重、染料配方、浴比、温度曲线、保温时间、后整理方式、色差值和评审结果。页面需要有小样批次列表、配方比例展示、Lab色差对比、工艺曲线摘要和按客户订单筛选。",
-  "palette": [
-    "#be123c",
-    "#4f46e5",
-    "#16a34a"
-  ],
-  "metrics": [
-    "小样批次",
-    "色差超限",
-    "客户订单",
-    "通过率"
-  ],
-  "filters": [
-    "棉",
-    "涤纶",
-    "锦纶",
-    "混纺"
-  ],
-  "fields": [
-    "面料成分",
-    "克重",
-    "染料配方",
-    "浴比",
-    "保温时间",
-    "色差值"
-  ],
-  "records": [
-    [
-      "LAB-620A",
-      "棉府绸120g",
-      "ΔE 0.84",
-      "评审通过"
-    ],
-    [
-      "LAB-621C",
-      "涤纶针织",
-      "升温曲线偏快",
-      "待复染"
-    ],
-    [
-      "LAB-624B",
-      "混纺斜纹",
-      "后整理柔软剂2%",
-      "客户确认中"
-    ]
-  ]
-};
+// 本地保存适配器集中在此创建；后续接单系统可替换为接口实现。
+const store = createLocalStorageStore();
 
-function App() {
+function nowText(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export default function App() {
+  const [batches, setBatches] = useState<SampleBatch[]>(() => store.load() ?? SEED_BATCHES);
+  const [orderKeyword, setOrderKeyword] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    store.save(batches);
+  }, [batches]);
+
+  // 筛选派生数据：列表、指标、订单下拉选项全部跟随关键字同步。
+  const filtered = useMemo(() => filterByOrder(batches, orderKeyword), [batches, orderKeyword]);
+  const stats = useMemo(() => computeStats(filtered), [filtered]);
+  const orderOptions = useMemo(
+    () =>
+      listOrderNos(batches).map((orderNo) => ({
+        orderNo,
+        count: batches.filter((b) => b.orderNo === orderNo).length,
+      })),
+    [batches]
+  );
+  const nextId = useMemo(() => nextBatchId(batches), [batches]);
+
+  function flash(message: string) {
+    setNotice(message);
+    window.setTimeout(() => setNotice(null), 4000);
+  }
+
+  function handleAdd(draft: SampleDraft) {
+    // 校验已在表单完成（validateDraft），这里只做类型转换与落库。
+    const weight = parseNumberField(draft.weight, { positive: true }).value!;
+    const deltaE = parseNumberField(draft.deltaE).value!;
+    const status = judgeStatus(deltaE);
+    const batch: SampleBatch = {
+      id: nextBatchId(batches),
+      orderNo: draft.orderNo.trim(),
+      fabric: draft.fabric.trim(),
+      weight,
+      formula: draft.formula
+        .filter((row) => row.name.trim() !== "" || row.percent.trim() !== "")
+        .map((row) => ({ name: row.name.trim(), percent: Number(row.percent) })),
+      liquorRatio: draft.liquorRatio.trim(),
+      tempCurve: draft.tempCurve.trim(),
+      holdMinutes: parseNumberField(draft.holdMinutes).value ?? 0,
+      finishing: draft.finishing.trim(),
+      deltaE,
+      status,
+      createdAt: nowText(),
+    };
+    setBatches((prev) => [batch, ...prev]);
+    flash(
+      status === "pending-redye"
+        ? `${batch.id} 色差 ΔE ${deltaE.toFixed(2)} 超限，已保存为「待复染」`
+        : `${batch.id} 已保存为「待复核」，色差合格后可标记通过`
+    );
+  }
+
+  function handlePass(id: string) {
+    setBatches((prev) => prev.map((b) => (b.id === id ? { ...b, status: "passed" } : b)));
+    flash(`${id} 已标记为评审通过`);
+  }
+
+  function handleExport() {
+    if (filtered.length === 0) {
+      flash("当前筛选结果为空，没有可导出的批次");
+      return;
+    }
+    const stamp = nowText().replace(/[^0-9]/g, "").slice(0, 12);
+    const suffix = orderKeyword.trim() ? `-${orderKeyword.trim()}` : "";
+    downloadCsv(filtered, `小样台账${suffix}-${stamp}.csv`);
+  }
+
   return (
     <main className="app">
       <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
+        <p>LAB LEDGER · 纺织染整实验室</p>
+        <h1>小样台账</h1>
+        <span>
+          记录面料成分、克重、染料配方与 Lab 色差；配方合计须为 100 ± 0.5%，色差 ΔE 不超过 1.0
+          的批次才可复核通过。校验、统计与本地保存逻辑位于 <code>src/lab</code>，可被后续接单系统复用。
+        </span>
       </section>
 
-      <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[28, 6, 14, 91][index] ?? 10}</strong>
-          </article>
-        ))}
-      </section>
+      <StatsBar stats={stats} />
+
+      {notice && <div className="toast">{notice}</div>}
 
       <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}分类</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel form-panel">
-          <div className="heading">
-            <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
-            </div>
-            <button className="primary">保存记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
+        <OrderFilter
+          keyword={orderKeyword}
+          options={orderOptions}
+          totalCount={batches.length}
+          onKeywordChange={setOrderKeyword}
+          onPick={setOrderKeyword}
+        />
+        <SampleForm nextId={nextId} onAdd={handleAdd} />
       </section>
 
       <section className="panel">
         <div className="heading">
           <div>
-            <p>近期记录</p>
-            <h2>工作台摘要</h2>
+            <p>小样批次</p>
+            <h2>
+              批次列表{orderKeyword.trim() && <span className="filter-scope">（订单 {orderKeyword.trim()}）</span>}
+            </h2>
           </div>
-          <button>导出CSV</button>
+          <button onClick={handleExport}>导出 CSV（当前筛选 {filtered.length} 批）</button>
         </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
+        <BatchList batches={filtered} onPass={handlePass} />
       </section>
     </main>
   );
 }
-
-export default App;
