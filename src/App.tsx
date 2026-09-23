@@ -1,128 +1,142 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import type { Batch, BatchDraft } from "./lib/types";
+import { SEED_BATCHES } from "./lib/seed";
+import { loadJSON, saveJSON } from "./lib/storage";
+import {
+  filterByOrder,
+  getStats,
+  listOrderNos,
+} from "./lib/stats";
+import { createBatch, generateBatchId, markPassed } from "./lib/ledger";
+import { batchesToCSV } from "./lib/csv";
+import MetricsBar from "./components/MetricsBar";
+import OrderFilter from "./components/OrderFilter";
+import BatchForm from "./components/BatchForm";
+import BatchList from "./components/BatchList";
 
-const project = {
-  "sourceNo": 7,
-  "id": "hxyfront-62012",
-  "port": 62012,
-  "title": "纺织染整小样管理",
-  "domain": "纺织染整",
-  "prompt": "我需要一个纺织染整实验室的小样管理前端系统，可以记录面料成分、克重、染料配方、浴比、温度曲线、保温时间、后整理方式、色差值和评审结果。页面需要有小样批次列表、配方比例展示、Lab色差对比、工艺曲线摘要和按客户订单筛选。",
-  "palette": [
-    "#be123c",
-    "#4f46e5",
-    "#16a34a"
-  ],
-  "metrics": [
-    "小样批次",
-    "色差超限",
-    "客户订单",
-    "通过率"
-  ],
-  "filters": [
-    "棉",
-    "涤纶",
-    "锦纶",
-    "混纺"
-  ],
-  "fields": [
-    "面料成分",
-    "克重",
-    "染料配方",
-    "浴比",
-    "保温时间",
-    "色差值"
-  ],
-  "records": [
-    [
-      "LAB-620A",
-      "棉府绸120g",
-      "ΔE 0.84",
-      "评审通过"
-    ],
-    [
-      "LAB-621C",
-      "涤纶针织",
-      "升温曲线偏快",
-      "待复染"
-    ],
-    [
-      "LAB-624B",
-      "混纺斜纹",
-      "后整理柔软剂2%",
-      "客户确认中"
-    ]
-  ]
-};
+const STORAGE_KEY = "lab-sample-ledger:v1";
 
-function App() {
+function loadBatches(): Batch[] {
+  const stored = loadJSON<unknown>(STORAGE_KEY, SEED_BATCHES);
+  if (!Array.isArray(stored)) return SEED_BATCHES;
+  return stored.filter(
+    (item): item is Batch =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Batch).id === "string" &&
+      typeof (item as Batch).orderNo === "string" &&
+      Number.isFinite((item as Batch).deltaE)
+  );
+}
+
+export default function App() {
+  const [batches, setBatches] = useState<Batch[]>(loadBatches);
+  const [orderFilter, setOrderFilter] = useState("");
+  const [exportNote, setExportNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEY, batches);
+  }, [batches]);
+
+  const orderNos = useMemo(() => listOrderNos(batches), [batches]);
+  const orderCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const batch of batches) {
+      map.set(batch.orderNo, (map.get(batch.orderNo) ?? 0) + 1);
+    }
+    return map;
+  }, [batches]);
+
+  const filtered = useMemo(
+    () => filterByOrder(batches, orderFilter),
+    [batches, orderFilter]
+  );
+  const stats = useMemo(() => getStats(filtered), [filtered]);
+
+  const handleAdd = (draft: BatchDraft) => {
+    setBatches((prev) => {
+      const batch = createBatch(
+        draft,
+        generateBatchId(prev),
+        new Date().toISOString()
+      );
+      return [batch, ...prev];
+    });
+  };
+
+  const handlePass = (id: string) => {
+    setBatches((prev) =>
+      prev.map((batch) => (batch.id === id ? markPassed(batch) : batch))
+    );
+  };
+
+  const handleExport = () => {
+    const csv = batchesToCSV(filtered);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const scope = orderFilter.trim() ? `-${orderFilter.trim()}` : "-全部";
+    link.href = url;
+    link.download = `小样台账${scope}-${new Date()
+      .toISOString()
+      .slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExportNote(
+      `已导出当前筛选结果 ${filtered.length} 个批次${
+        orderFilter.trim() ? `（订单 ${orderFilter.trim()}）` : "（全部订单）"
+      }`
+    );
+    window.setTimeout(() => setExportNote(null), 3000);
+  };
+
   return (
     <main className="app">
       <section className="hero">
-        <p>{project.id} · 源提示词{project.sourceNo} · Port {project.port}</p>
-        <h1>{project.title}</h1>
-        <span>{project.prompt}</span>
+        <p>纺织染整实验室 · 小样台账</p>
+        <h1>纺织染整小样管理</h1>
+        <span>
+          新增小样时校验克重与染料配方合计，色差 ΔE 不超过 1.0
+          的批次才可复核通过，超限批次自动保存为待复染。支持按客户订单筛选批次、统计超限数与通过率，并导出当前筛选结果
+          CSV。数据保存在浏览器本地，校验与统计模块可被后续接单系统直接复用。
+        </span>
       </section>
 
-      <section className="metrics">
-        {project.metrics.map((metric: string, index: number) => (
-          <article key={metric}>
-            <small>{metric}</small>
-            <strong>{[28, 6, 14, 91][index] ?? 10}</strong>
-          </article>
-        ))}
-      </section>
+      <MetricsBar stats={stats} filtered={orderFilter.trim() !== ""} />
 
       <section className="workspace">
-        <aside className="panel">
-          <h2>{project.domain}分类</h2>
-          <div className="chips">
-            {project.filters.map((item: string) => (
-              <button key={item}>{item}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel form-panel">
-          <div className="heading">
-            <div>
-              <p>专业字段</p>
-              <h2>新增记录</h2>
-            </div>
-            <button className="primary">保存记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
+        <OrderFilter
+          orderNos={orderNos}
+          value={orderFilter}
+          onChange={setOrderFilter}
+          counts={orderCounts}
+        />
+        <BatchForm onAdd={handleAdd} />
       </section>
 
       <section className="panel">
         <div className="heading">
           <div>
-            <p>近期记录</p>
-            <h2>工作台摘要</h2>
+            <p>近期记录{orderFilter.trim() ? " · 已按订单筛选" : ""}</p>
+            <h2>
+              小样批次列表（{filtered.length}
+              {orderFilter.trim() ? ` / 共 ${batches.length}` : ""}）
+            </h2>
           </div>
-          <button>导出CSV</button>
+          <div className="heading-actions">
+            {exportNote ? <span className="export-note">{exportNote}</span> : null}
+            <button type="button" onClick={handleExport}>
+              导出CSV（当前筛选）
+            </button>
+          </div>
         </div>
-        <div className="records">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")}>
-              <b>{String(index + 1).padStart(2, "0")}</b>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
+        <BatchList
+          batches={filtered}
+          filterActive={orderFilter.trim() !== ""}
+          onPass={handlePass}
+        />
       </section>
     </main>
   );
 }
-
-export default App;
